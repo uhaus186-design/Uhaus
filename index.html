@@ -164,6 +164,7 @@ nav.tabs button.on::after{content:"";position:absolute;top:4px;width:5px;height:
 .sheet .grab{width:40px;height:5px;border-radius:3px;background:var(--sand);margin:8px auto 0}
 .sheet .hd{display:flex;align-items:center;gap:10px;padding:8px 16px 10px}
 .sheet .hd h2{font-size:19px;flex:1;min-width:0}
+.sheet .bd>*{flex-shrink:0}
 .sheet .bd{overflow-y:auto;padding:4px max(16px,env(safe-area-inset-right,0px)) calc(22px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:14px;-webkit-overflow-scrolling:touch}
 
 /* Room grid */
@@ -353,8 +354,13 @@ const physical = r => r.combines ? String(r.combines).split(',').map(s => s.trim
 const isLive = b => b.status === 'reserved' || b.status === 'in' || (b.status === 'pending' && Number(b.holdUntil) > Date.now());
 const holdLeftMin = b => Math.max(0, Math.ceil((Number(b.holdUntil) - Date.now()) / 60000));
 const hhmm = ms => { const d = new Date(Number(ms)); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
-function receiptsOf(b) { return S.receipts.filter(r => r.refType === 'booking' && r.refId === b.id); }
-function paidOf(b) { return Math.round(receiptsOf(b).filter(r => r.status === 'issued').reduce((n, r) => n + Number(r.total), 0) * 100) / 100; }
+function allocAmt(r, b) {
+  if (r.refType === 'booking') return r.refId === b.id ? Number(r.total) : 0;
+  if (r.refType === 'group') { try { return Number((JSON.parse(r.alloc || '{}') || {})[b.id] || 0); } catch (e) { return 0; } }
+  return 0;
+}
+function receiptsOf(b) { return S.receipts.filter(r => (r.refType === 'booking' && r.refId === b.id) || (r.refType === 'group' && allocAmt(r, b) !== 0)); }
+function paidOf(b) { return Math.round(receiptsOf(b).filter(r => r.status === 'issued').reduce((n, r) => n + allocAmt(r, b), 0) * 100) / 100; }
 function forfeitsOf(b) { try { return JSON.parse(b.forfeits || '[]') || []; } catch (e) { return []; } }
 function balanceOf(b) { return Math.round((Number(b.total) - (paidOf(b) - (Number(b.forfeited) || 0))) * 100) / 100; }
 function peakPeriods() { try { return JSON.parse(S.settings.peakPeriods || '[]') || []; } catch (e) { return []; } }
@@ -509,7 +515,7 @@ function bookingRow(b) {
   else if (b.status === 'in' && b.checkOut < t) flag = '<span class="pill p-warn">เกินกำหนดออก</span>';
   const bal = (b.status === 'reserved' || b.status === 'in') ? balanceOf(b) : 0;
   return `<div class="row" data-bk="${b.id}">${petAvatar(b)}<div class="main"><div class="t">${esc(petNames(b) || '-')} · ${esc(r.name || b.roomId)}</div>
-    <div class="s">${esc(c.name || '')} · ${thDate(b.checkIn, false)} – ${thDate(b.checkOut, false)} (${b.nights} คืน)</div></div>
+    <div class="s">${esc(c.name || '')} · ${thDate(b.checkIn, false)} – ${thDate(b.checkOut, false)} (${b.nights} คืน)${groupOf(b).length > 1 ? ' · จองรวม ' + groupOf(b).length + ' ห้อง' : ''}</div></div>
     <div class="end">${flag || pillStatus(b)}<span class="small num ${bal > 0 ? '' : 'muted'}" ${bal > 0 ? 'style="color:var(--terra-dark);font-weight:600"' : ''}>${bal > 0 ? 'ค้าง ' + money(bal) : money(b.total)} ฿</span></div></div>`;
 }
 function groomRow(g) {
@@ -810,7 +816,8 @@ function customerPicker(bd, initialId, onPick) {
 }
 
 /* ---------- Booking form ---------- */
-function openBookingForm(d) {
+function openBookingForm(d) { if (!d || !d.id) return openGroupForm(d || {}); return openBookingEdit(d); }
+function openBookingEdit(d) {
   d = Object.assign({ petIds: [], note: '', adjust: 0, adjustNote: '', channel: 'line' }, d);
   if (typeof d.petIds === 'string') d.petIds = petIdsOf(d);
   const orig = d.id ? byId(S.bookings, d.id) : null;
@@ -924,6 +931,151 @@ function openBookingForm(d) {
   });
 }
 
+/* ---------- Group booking (หลายห้องในครั้งเดียว) ---------- */
+function groupOf(b) { const g = b.groupId || b.id; return S.bookings.filter(x => (x.groupId || x.id) === g); }
+const openStates = ['pending', 'reserved', 'in'];
+function groupDue(grp) { return grp.filter(x => openStates.includes(effStatus(x))).reduce((n, x) => n + Math.max(0, balanceOf(x)), 0); }
+function openGroupForm(d) {
+  d = Object.assign({ channel: 'line', note: '' }, d);
+  const fixed = d.groupId || '';
+  let channel = d.channel;
+  const shared = { checkIn: d.checkIn, checkOut: d.checkOut };
+  const lines = [{ roomId: d.roomId || '', petIds: [], own: false, checkIn: d.checkIn, checkOut: d.checkOut }];
+  const fixedCust = fixed ? cust(d.customerId) : null;
+  openSheet(fixed ? 'เพิ่มห้องในการจองนี้' : 'จองห้องพัก', `<form class="form" id="gf">
+    ${fixed ? '' : `<div class="f"><label>ลูกค้าจองผ่าน</label><div class="seg" id="g-ch">${Object.keys(CHANNELS).map(k => `<button type="button" data-v="${k}" class="${channel === k ? 'on' : ''}">${CHANNELS[k]}</button>`).join('')}</div></div>`}
+    <div id="g-cust">${fixedCust ? `<div class="f"><label>ลูกค้า</label><div class="picked"><div class="main"><b>${esc(fixedCust.name)}</b><div class="small muted">${esc(fixedCust.phone || '')}</div></div></div></div>` : ''}</div>
+    <div class="grid2">${field('g-in', 'วันเข้า', shared.checkIn, 'date')}${field('g-out', 'วันออก', shared.checkOut, 'date')}</div>
+    <div id="g-lines" class="form"></div>
+    <div class="btns"><button type="button" class="btn ghost" id="g-add">+ เพิ่มห้อง</button><button type="button" class="btn ghost" id="g-np">+ เพิ่มน้องใหม่</button></div>
+    <div id="g-sum"></div>
+    ${area('g-note', 'หมายเหตุการจอง', d.note)}
+    <button class="btn red full" type="submit" id="g-go"></button></form>`, (bd, el) => {
+    const goLabel = () => { $('#g-go', bd).textContent = channel === 'walkin' && !fixed ? 'บันทึกและรับเงิน' : `จอง ${lines.length} ห้อง (ล็อกรอโอน ${Number(S.settings.holdMinutes) || 30} นาที)`; };
+    $$('#g-ch button', bd).forEach(b => b.onclick = () => { channel = b.dataset.v; $$('#g-ch button', bd).forEach(x => x.classList.toggle('on', x === b)); goLabel(); });
+    if (!fixed) $('#g-cust', bd).appendChild(customerPicker(bd, d.customerId, id => { d.customerId = id; lines.forEach(l => l.petIds = []); draw(); }));
+    const dates = l => l.own ? { checkIn: l.checkIn, checkOut: l.checkOut } : shared;
+    const overlaps = (a, b) => a.checkIn < b.checkOut && b.checkIn < a.checkOut;
+    function draw() {
+      goLabel();
+      const box = $('#g-lines', bd);
+      if (!d.customerId) { box.innerHTML = '<div class="alert info small">เลือกลูกค้าก่อน แล้วเลือกน้องและห้องทีละห้อง</div>'; $('#g-sum', bd).innerHTML = ''; return; }
+      const ps = S.pets.filter(p => p.customerId === d.customerId);
+      let grand = 0;
+      box.innerHTML = lines.map((l, i) => {
+        const dt = dates(l), valid = dt.checkIn && dt.checkOut && dt.checkOut > dt.checkIn;
+        const species = [...new Set(l.petIds.map(id => (pet(id) || {}).species))];
+        const n = l.petIds.length || 1;
+        const takenBy = id => lines.findIndex((o, j) => j !== i && o.petIds.includes(id));
+        const petsHtml = ps.length ? ps.map(p => { const k = takenBy(p.id); return `<label class="chk" style="${k >= 0 ? 'opacity:.5' : ''}"><input type="checkbox" data-pet="${i}" value="${p.id}" ${l.petIds.includes(p.id) ? 'checked' : ''} ${k >= 0 ? 'disabled' : ''}><span><b style="color:var(--navy)">${esc(p.name)}</b> <span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'}${k >= 0 ? ' · อยู่ห้องที่ ' + (k + 1) : ''}</span></span></label>`; }).join('') : '<div class="muted small">ลูกค้ายังไม่มีน้องในระบบ กด "+ เพิ่มน้องใหม่"</div>';
+        let opts = '<option value="">– เลือกห้อง –</option>';
+        ZONES.forEach(z => {
+          const rs = activeRooms().filter(r => r.zone === z && (species.length !== 1 || r.species === species[0]));
+          if (!rs.length) return;
+          opts += `<optgroup label="${esc(z)}">` + rs.map(r => {
+            const busy = valid && conflictsFor(r.id, dt.checkIn, dt.checkOut).length;
+            const twin = lines.findIndex((o, j) => j !== i && o.roomId && room(o.roomId) && overlaps(dates(o), dt) && physical(room(o.roomId)).some(x => physical(r).includes(x)));
+            const over = r.maxPets !== '' && Number(r.maxPets) > 0 && n > Number(r.maxPets);
+            const tag = busy ? ' · ไม่ว่าง' : twin >= 0 ? ` · เลือกแล้วในห้องที่ ${twin + 1}` : over ? ` · เกิน ${r.maxPets} ตัว` : '';
+            return `<option value="${r.id}" ${(busy || twin >= 0 || over) && r.id !== l.roomId ? 'disabled' : ''} ${r.id === l.roomId ? 'selected' : ''}>${esc(r.name)} · ${money(r.price)} ฿${tag}</option>`;
+          }).join('') + '</optgroup>';
+        });
+        let price = '';
+        const r = room(l.roomId);
+        if (r && valid && l.petIds.length) {
+          const nights = nightsBetween(dt.checkIn, dt.checkOut), p = calcPrice(r, l.petIds.length, nights), tot = p.subtotal - p.discount;
+          grand += tot;
+          price = `<div class="price num"><div class="ln"><span>${money(p.roomRate)} × ${nights} คืน</span><span>${money(p.roomAmount)}</span></div>
+            ${p.extraPets ? `<div class="ln"><span>ตัวเพิ่ม ${p.extraPets} × ${money(p.extraFee)} × ${nights}</span><span>${money(p.extraAmount)}</span></div>` : ''}
+            ${p.discount ? `<div class="ln ok"><span>โปร ${S.settings.promoNights} คืน −${S.settings.promoPct}%</span><span>−${money(p.discount)}</span></div>` : ''}
+            <div class="ln" style="font-weight:600;color:var(--navy)"><span>ห้องนี้</span><span>${money(tot)} ฿</span></div></div>${bookingVaxAlert({ petIds: l.petIds.join(','), checkOut: dt.checkOut })}`;
+        }
+        return `<div class="card form" style="gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="font-size:16px">ห้องที่ ${i + 1}</h3>${lines.length > 1 ? `<button type="button" class="lnk" data-rm="${i}" style="background:none;border:0;color:var(--terra);font-weight:600;cursor:pointer">ลบห้องนี้</button>` : ''}</div>
+          <div class="form" style="gap:6px">${petsHtml}</div>
+          <label class="chk"><input type="checkbox" data-own="${i}" ${l.own ? 'checked' : ''}><span class="small">วันเข้า–ออกของห้องนี้ต่างจากห้องอื่น</span></label>
+          ${l.own ? `<div class="grid2"><div class="f"><label>วันเข้า</label><input type="date" data-in="${i}" value="${esc(l.checkIn || '')}"></div><div class="f"><label>วันออก</label><input type="date" data-out="${i}" value="${esc(l.checkOut || '')}"></div></div>` : ''}
+          <div class="f"><label>ห้อง</label><select data-room="${i}">${opts}</select></div>${price}</div>`;
+      }).join('');
+      $('#g-sum', bd).innerHTML = grand ? `<div class="price num"><div class="ln tot"><span>รวม ${lines.length} ห้อง</span><span>${money(grand)} ฿</span></div></div>` : '';
+      $$('[data-pet]', box).forEach(c => c.onchange = () => { const l = lines[+c.dataset.pet]; l.petIds = c.checked ? [...l.petIds, c.value] : l.petIds.filter(x => x !== c.value); draw(); });
+      $$('[data-room]', box).forEach(s => s.onchange = () => { lines[+s.dataset.room].roomId = s.value; draw(); });
+      $$('[data-own]', box).forEach(c => c.onchange = () => { const l = lines[+c.dataset.own]; l.own = c.checked; if (l.own) { l.checkIn = l.checkIn || shared.checkIn; l.checkOut = l.checkOut || shared.checkOut; } draw(); });
+      $$('[data-in]', box).forEach(x => x.onchange = () => { const l = lines[+x.dataset.in]; l.checkIn = x.value; if (!l.checkOut || l.checkOut <= l.checkIn) l.checkOut = addDays(l.checkIn, 1); draw(); });
+      $$('[data-out]', box).forEach(x => x.onchange = () => { lines[+x.dataset.out].checkOut = x.value; draw(); });
+      $$('[data-rm]', box).forEach(b => b.onclick = () => { lines.splice(+b.dataset.rm, 1); draw(); });
+    }
+    $('#g-in', bd).onchange = () => { shared.checkIn = fv(bd, 'g-in'); if (!shared.checkOut || shared.checkOut <= shared.checkIn) { shared.checkOut = addDays(shared.checkIn, 1); $('#g-out', bd).value = shared.checkOut; } draw(); };
+    $('#g-out', bd).onchange = () => { shared.checkOut = fv(bd, 'g-out'); draw(); };
+    $('#g-add', bd).onclick = () => { lines.push({ roomId: '', petIds: [], own: false, checkIn: shared.checkIn, checkOut: shared.checkOut }); draw(); };
+    $('#g-np', bd).onclick = () => { if (!d.customerId) return toast('เลือกลูกค้าก่อน'); openPetForm({ customerId: d.customerId }, p => { const free = lines.find(l => !l.petIds.length) || lines[lines.length - 1]; if (p) free.petIds.push(p.id); draw(); }); };
+    draw();
+    $('#gf', bd).onsubmit = async e => {
+      e.preventDefault();
+      if (!d.customerId) return toast('กรุณาเลือกลูกค้า');
+      for (let i = 0; i < lines.length; i++) {
+        const dt = dates(lines[i]);
+        if (!lines[i].petIds.length) return toast(`ห้องที่ ${i + 1}: กรุณาเลือกน้อง`);
+        if (!lines[i].roomId) return toast(`ห้องที่ ${i + 1}: กรุณาเลือกห้อง`);
+        if (!(dt.checkIn && dt.checkOut && dt.checkOut > dt.checkIn)) return toast(`ห้องที่ ${i + 1}: วันออกต้องหลังวันเข้า`);
+      }
+      try {
+        const grp = await api('saveGroup', { groupId: fixed, customerId: d.customerId, channel, note: fv(bd, 'g-note'),
+          lines: lines.map(l => Object.assign({ roomId: l.roomId, petIds: l.petIds }, dates(l))) });
+        grp.forEach(x => upsert(S.bookings, x));
+        closeAllSheets(); render();
+        const gid = grp[0].groupId || grp[0].id;
+        if (!fixed && channel === 'walkin') { openPayGroup(gid, true); return; }
+        const first = grp.find(x => x.status === 'pending') || grp[0];
+        toast(`จองแล้ว ${grp.length > 1 ? grp.length + ' ห้อง ' : ''}ส่งยอดให้ลูกค้าโอนภายใน ${hhmm(first.holdUntil)} น.`);
+        openBooking(first.id);
+      } catch (err) { toast(err.message, 5000); }
+    };
+  });
+}
+function openPayGroup(gid, walkin) {
+  const grp = S.bookings.filter(x => (x.groupId || x.id) === gid);
+  const rows = grp.filter(x => openStates.includes(effStatus(x)) && balanceOf(x) > 0);
+  const due = rows.reduce((n, x) => n + balanceOf(x), 0);
+  const canIn = rows.some(x => x.status !== 'in' && x.checkIn <= today());
+  openSheet('รับเงินทั้งกลุ่ม', `
+    <div class="list">${rows.map(x => `<div class="row" style="cursor:default"><div class="main"><div class="t">${esc((room(x.roomId) || {}).name || '')} · ${esc(petNames(x))}</div><div class="s">${thDate(x.checkIn)} – ${thDate(x.checkOut)}</div></div><div class="end num">${money2(balanceOf(x))}</div></div>`).join('')}</div>
+    <div class="alert info small">ตรวจสลิปให้ตรงยอดรวมก่อนกดยืนยัน ระบบจะออกใบเสร็จใบเดียวรวมทุกห้อง</div>
+    ${payPanel(due)}
+    ${canIn ? `<label class="chk"><input type="checkbox" id="ci" ${walkin ? 'checked' : ''}><span>เช็กอินทันที (ห้องที่ถึงวันเข้าพักแล้ว)</span></label>` : ''}
+    <button class="btn red full" id="go">ยืนยันได้รับเงินและออกใบเสร็จ</button>`, bd => {
+    const method = bindPay(bd);
+    $('#go', bd).onclick = async () => {
+      try {
+        const r = await api('payGroup', { groupId: gid, method: method(), checkIn: !!($('#ci', bd) && $('#ci', bd).checked) }, { text: 'กำลังออกใบเสร็จ…' });
+        r.bookings.forEach(x => upsert(S.bookings, x)); upsert(S.receipts, r.receipt);
+        closeAllSheets(); render(); toast('รับเงินและออกใบเสร็จแล้ว'); openReceipt(r.receipt.id);
+      } catch (e) { toast(e.message, 5000); }
+    };
+  });
+}
+function openCheckoutGroup(gid) {
+  const ins = S.bookings.filter(x => (x.groupId || x.id) === gid && x.status === 'in');
+  const due = ins.reduce((n, x) => n + Math.max(0, balanceOf(x)), 0), t = today();
+  const early = ins.filter(x => x.checkOut > t), late = ins.filter(x => x.checkOut < t);
+  openSheet('เช็กเอาท์ทั้งกลุ่ม', `
+    <div class="list">${ins.map(x => `<div class="row" style="cursor:default"><div class="main"><div class="t">${esc((room(x.roomId) || {}).name || '')} · ${esc(petNames(x))}</div><div class="s">กำหนดออก ${thDate(x.checkOut)}</div></div></div>`).join('')}</div>
+    ${early.length ? `<div class="alert warn">${early.length} ห้องออกก่อนกำหนด ตามนโยบายไม่คืนเงิน ส่วนที่ไม่ได้พักบันทึกเป็นรายได้จากการริบเงินจอง</div>` : ''}
+    ${late.length ? '<div class="alert bad">มีห้องเกินกำหนดออก ถ้าพักเพิ่ม ให้แก้วันออกของห้องนั้นก่อน</div>' : ''}
+    ${due > 0 ? payPanel(due) : '<div class="alert ok">ชำระครบแล้ว ไม่มียอดค้าง</div>'}
+    <button class="btn red full" id="go">${due > 0 ? 'รับเงินและเช็กเอาท์ทั้งหมด' : 'ยืนยันเช็กเอาท์ทั้งหมด'}</button>`, bd => {
+    const method = due > 0 ? bindPay(bd) : () => '';
+    $('#go', bd).onclick = async () => {
+      try {
+        const r = await api('checkoutGroup', { groupId: gid, method: method() }, { text: 'กำลังเช็กเอาท์…' });
+        r.bookings.forEach(x => upsert(S.bookings, x)); if (r.receipt) upsert(S.receipts, r.receipt);
+        closeAllSheets(); render(); toast('เช็กเอาท์ครบทุกห้องแล้ว');
+        if (r.receipt) openReceipt(r.receipt.id);
+      } catch (e) { toast(e.message, 5000); }
+    };
+  });
+}
+
 /* ---------- Booking detail ---------- */
 function openBooking(id) {
   const b = byId(S.bookings, id); if (!b) return;
@@ -931,10 +1083,13 @@ function openBooking(id) {
   const pets = petIdsOf(b).map(pet).filter(Boolean);
   const rcs = receiptsOf(b), paid = paidOf(b), forf = forfeitsOf(b), bal = balanceOf(b);
   const paidStage = ['reserved', 'in', 'out', 'cancelled', 'noshow'].includes(b.status);
+  const grp = groupOf(b), grouped = grp.length > 1, gid = b.groupId || b.id;
   openSheet('รายละเอียดการจอง', `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2 style="font-size:21px">${esc(r.name || b.roomId)}</h2>${pillStatus(b)}</div>
     ${st === 'pending' ? `<div class="hold">${ICON.clock}<div>ล็อกห้องรอโอนถึง <b>${hhmm(b.holdUntil)} น.</b><br><span data-hold="${b.holdUntil}">เหลือ ${holdLeftMin(b)} นาที</span> เกินเวลาห้องจะว่างอัตโนมัติ</div></div>` : ''}
     ${st === 'expired' ? '<div class="alert warn">หมดเวลารอโอนแล้ว ห้องถูกปล่อยว่าง ถ้าลูกค้ายังต้องการ กด "จองใหม่" เพื่อเช็กห้องและล็อกใหม่อีกครั้ง</div>' : ''}
+    ${grouped ? `<div class="list"><div style="padding:12px 16px 6px;display:flex;justify-content:space-between;gap:8px"><b style="color:var(--navy)">จองรวม ${grp.length} ห้อง</b><span class="muted small num">ยอดรวม ${money(grp.filter(x => !['cancelled', 'expired'].includes(effStatus(x))).reduce((n, x) => n + Number(x.total), 0))} ฿</span></div>
+      ${grp.map(x => `<div class="row" data-gb="${x.id}" style="${x.id === b.id ? 'background:var(--paper2)' : ''}">${petAvatar(x)}<div class="main"><div class="t">${esc((room(x.roomId) || {}).name || '')}</div><div class="s">${esc(petNames(x))} · ${thDate(x.checkIn, false)} – ${thDate(x.checkOut, false)}</div></div><div class="end">${pillStatus(x)}</div></div>`).join('')}</div>` : ''}
     <div class="card"><dl class="kv">
       <dt>ลูกค้า</dt><dd><b data-cu="${c.id}" style="cursor:pointer;color:var(--terra)">${esc(c.name || '-')}</b> · <span class="num">${esc(c.phone || '')}</span></dd>
       <dt>เข้าพัก</dt><dd>${thDateLong(b.checkIn)} – ${thDateLong(b.checkOut)} · <b>${b.nights} คืน</b></dd>
@@ -962,16 +1117,27 @@ function openBooking(id) {
     <div class="btns" id="acts"></div>`, (bd, el) => {
     $$('[data-cu]', bd).forEach(x => x.onclick = () => { closeAllSheets(); go('customer', x.dataset.cu); });
     $$('[data-rc]', bd).forEach(x => x.onclick = () => openReceipt(x.dataset.rc));
+    $$('[data-gb]', bd).forEach(x => x.onclick = () => { if (x.dataset.gb !== b.id) { closeSheet(el); openBooking(x.dataset.gb); } });
     const acts = $('#acts', bd);
     const add = (label, cls, fn) => { const bt = document.createElement('button'); bt.className = 'btn ' + cls; bt.innerHTML = label; bt.onclick = fn; acts.appendChild(bt); return bt; };
     const setStatus = async (status, msg, extra) => {
       try { const rec = await api('setBookingStatus', Object.assign({ id: b.id, status }, extra || {})); upsert(S.bookings, rec); closeSheet(el); render(); toast(msg); openBooking(b.id); } catch (e) { toast(e.message, 4000); }
     };
     const edit = () => { closeSheet(el); openBookingForm(Object.assign({}, b)); };
-    const send = () => openConfirmMsg(b.id);
+    const send = () => openConfirmMsg(b.id, grouped);
+    if (grouped) {
+      const due = groupDue(grp), anyExp = grp.some(x => effStatus(x) === 'expired');
+      if (due > 0 && !anyExp) add(`รับเงินทั้งกลุ่ม ${money(due)} ฿`, 'red', () => { closeSheet(el); openPayGroup(gid, false); });
+      if (grp.some(x => openStates.includes(effStatus(x)))) add(ICON.send + 'ส่งข้อความทั้งกลุ่ม', 'pri', send);
+      if (grp.some(x => x.status === 'reserved' && x.checkIn <= today() && balanceOf(x) <= 0)) add('เช็กอินทั้งกลุ่ม', 'pri', async () => {
+        try { const r = await api('groupStatus', { groupId: gid, status: 'in' }); r.bookings.forEach(x => upsert(S.bookings, x)); closeSheet(el); render(); toast('เช็กอินแล้ว' + (r.skipped.length ? ` (ข้าม ${r.skipped.length} ห้อง)` : '')); openBooking(b.id); } catch (e) { toast(e.message, 4500); }
+      });
+      if (grp.some(x => x.status === 'in')) add('เช็กเอาท์ทั้งกลุ่ม', 'red', () => { closeSheet(el); openCheckoutGroup(gid); });
+      const sep = document.createElement('div'); sep.style.cssText = 'flex-basis:100%;border-top:1px dashed var(--sand);margin:4px 0;font-size:12px;color:var(--muted);padding-top:6px'; sep.textContent = 'เฉพาะห้องนี้'; acts.appendChild(sep);
+    }
     if (st === 'pending') {
-      add('รับเงิน · ยืนยันการจอง', 'red', () => { closeSheet(el); openPay(b.id, false); });
-      add(ICON.send + 'ส่งยอดให้ลูกค้า', 'pri', send);
+      if (!grouped) add('รับเงิน · ยืนยันการจอง', 'red', () => { closeSheet(el); openPay(b.id, false); });
+      if (!grouped) add(ICON.send + 'ส่งยอดให้ลูกค้า', 'pri', send);
       add('แก้ไข', 'ghost', edit);
       confirmBtn(add('ยกเลิกการจอง', 'danger', null), 'แตะอีกครั้งเพื่อยกเลิก', () => setStatus('cancelled', 'ยกเลิกการจองแล้ว'));
     }
@@ -985,9 +1151,9 @@ function openBooking(id) {
       confirmBtn(add('ปิดรายการ', 'danger', null), 'แตะอีกครั้งเพื่อปิด', () => setStatus('cancelled', 'ปิดรายการแล้ว'));
     }
     if (b.status === 'reserved') {
-      if (bal > 0) add(`รับเงินส่วนต่าง ${money(bal)} ฿`, 'red', () => { closeSheet(el); openPay(b.id, false); });
-      else add('เช็กอิน', 'red', () => setStatus('in', 'เช็กอินแล้ว'));
-      add(ICON.send + 'ส่งยืนยันให้ลูกค้า', 'pri', send);
+      if (bal > 0) { if (!grouped) add(`รับเงินส่วนต่าง ${money(bal)} ฿`, 'red', () => { closeSheet(el); openPay(b.id, false); }); }
+      else add('เช็กอิน', grouped ? 'ghost' : 'red', () => setStatus('in', 'เช็กอินแล้ว'));
+      if (!grouped) add(ICON.send + 'ส่งยืนยันให้ลูกค้า', 'pri', send);
       add((Number(b.postponed) || 0) >= (Number(S.settings.postponeMax) || 1) ? 'แก้ไข (เลื่อนครบแล้ว)' : 'เลื่อนวัน / แก้ไข', 'ghost', edit);
       if (isAdmin()) {
         if (b.checkIn <= today()) add('ไม่มาเข้าพัก (ยึดเงิน)', 'danger', () => openForfeit(b, 'noshow'));
@@ -997,9 +1163,10 @@ function openBooking(id) {
     if (b.status === 'in') {
       add('เช็กเอาท์' + (bal > 0 ? ` + รับเงิน ${money(bal)} ฿` : ''), 'red', () => { closeSheet(el); openCheckout(b.id); });
       add('ต่อวัน / แก้ไข', 'ghost', edit);
-      add(ICON.send + 'ส่งข้อความให้ลูกค้า', 'ghost', send);
+      if (!grouped) add(ICON.send + 'ส่งข้อความให้ลูกค้า', 'ghost', send);
       confirmBtn(add('ยกเลิกเช็กอิน', 'ghost', null), 'แตะอีกครั้งเพื่อยืนยัน', () => setStatus('reserved', 'กลับเป็นสถานะชำระแล้ว'));
     }
+    if (openStates.includes(st)) add('+ เพิ่มห้องให้ลูกค้านี้', 'ghost', () => { closeSheet(el); openGroupForm({ groupId: gid, customerId: b.customerId, checkIn: b.checkIn, checkOut: b.checkOut, channel: b.channel }); });
     if ((b.status === 'cancelled' || st === 'expired') && isAdmin() && paid <= 0) {
       confirmBtn(add('ลบรายการถาวร', 'danger', null), 'แตะอีกครั้งเพื่อลบ', async () => {
         await api('deleteRecord', { type: 'booking', id: b.id }); S.bookings = S.bookings.filter(x => x.id !== b.id); closeSheet(el); render(); toast('ลบแล้ว');
@@ -1084,20 +1251,32 @@ function openCheckout(id) {
 }
 
 /* ---------- Confirmation message for LINE / Messenger ---------- */
-function confirmText(b) {
-  const s = S.settings, c = cust(b.customerId) || {}, r = room(b.roomId) || {}, st = effStatus(b);
-  const lines = [`ยืนยันการจองห้องพัก ${s.brandName || 'Uhaus'}`, '', (/^(คุณ|คุน|K\.|Khun)/i.test(c.name || '') ? (c.name || '') : 'คุณ' + (c.name || '')),
-    `น้อง: ${petNames(b)}`, `ห้อง: ${r.name || ''}`,
-    `เข้าพัก: ${thDateLong(b.checkIn)}`, `เช็กเอาท์: ${thDateLong(b.checkOut)} (${b.nights} คืน)`];
-  if (Number(b.discount)) lines.push(`ส่วนลดพัก ${s.promoNights} คืนขึ้นไป: ${money(b.discount)} บาท`);
-  lines.push(`ยอดรวม: ${money2(b.total)} บาท`, '');
-  if (st === 'pending') {
-    lines.push(`กรุณาโอนเต็มจำนวนภายในเวลา ${hhmm(b.holdUntil)} น. (${Number(s.holdMinutes) || 30} นาที) เพื่อยืนยันการจอง หากเกินเวลา ระบบจะยกเลิกการจองอัตโนมัติ`,
+function confirmText(b, group) {
+  const s = S.settings, c = cust(b.customerId) || {};
+  const list = (group ? groupOf(b) : [b]).filter(x => openStates.includes(effStatus(x)) || x.status === 'out');
+  const pending = list.filter(x => effStatus(x) === 'pending');
+  const total = list.reduce((n, x) => n + Number(x.total), 0);
+  const name = c.name || '';
+  const lines = [`ยืนยันการจองห้องพัก ${s.brandName || 'Uhaus'}`, '', (/^(คุณ|คุน|K\.|Khun)/i.test(name) ? name : 'คุณ' + name), ''];
+  list.forEach((x, i) => {
+    const r = room(x.roomId) || {};
+    if (list.length > 1) lines.push(`ห้องที่ ${i + 1}: ${r.name || ''}`); else lines.push(`ห้อง: ${r.name || ''}`);
+    lines.push(`น้อง: ${petNames(x)}`, `เข้าพัก ${thDateLong(x.checkIn)} – เช็กเอาท์ ${thDateLong(x.checkOut)} (${x.nights} คืน)`);
+    if (Number(x.discount)) lines.push(`ส่วนลดพัก ${s.promoNights} คืนขึ้นไป ${money(x.discount)} บาท`);
+    lines.push(`ค่าห้อง ${money2(x.total)} บาท`, '');
+  });
+  if (list.length > 1) lines.push(`ยอดรวม ${list.length} ห้อง: ${money2(total)} บาท`, '');
+  if (pending.length) {
+    const until = Math.min(...pending.map(x => Number(x.holdUntil)));
+    const paidSoFar = list.reduce((n, x) => n + paidOf(x), 0);
+    const due = list.reduce((n, x) => n + Math.max(0, balanceOf(x)), 0);
+    if (paidSoFar > 0) lines.push(`ชำระแล้ว ${money2(paidSoFar)} บาท ยอดที่ต้องโอนเพิ่ม ${money2(due)} บาท`);
+    lines.push(`กรุณาโอนเต็มจำนวนภายในเวลา ${hhmm(until)} น. (${Number(s.holdMinutes) || 30} นาที) เพื่อยืนยันการจอง หากเกินเวลา ระบบจะยกเลิกการจองอัตโนมัติ`,
       '', `${s.bankName}`, `เลขที่บัญชี ${s.bankAccount}`, `ชื่อบัญชี ${s.bankAccountName}`, '', 'โอนแล้วส่งสลิปในแชตนี้ได้เลยค่ะ');
   } else {
-    const rcs = receiptsOf(b).filter(x => x.status === 'issued');
-    const bal = balanceOf(b);
-    lines.push(`ได้รับชำระแล้ว ${money2(paidOf(b))} บาท${rcs.length ? ' (ใบเสร็จเลขที่ ' + rcs.map(x => x.no).join(', ') + ')' : ''}`);
+    const nos = [...new Set(list.flatMap(x => receiptsOf(x).filter(r => r.status === 'issued').map(r => r.no)))];
+    const bal = list.reduce((n, x) => n + Math.max(0, balanceOf(x)), 0);
+    lines.push(`ได้รับชำระแล้ว ${money2(list.reduce((n, x) => n + paidOf(x), 0))} บาท${nos.length ? ' (ใบเสร็จเลขที่ ' + nos.join(', ') + ')' : ''}`);
     if (bal > 0) lines.push(`ยอดค้างชำระ ${money2(bal)} บาท`);
     lines.push('การจองได้รับการยืนยันแล้วค่ะ');
   }
@@ -1106,9 +1285,9 @@ function confirmText(b) {
     '• กรุณานำสมุดวัคซีนของน้องมาในวันเข้าพัก', '', `ขอบคุณที่ไว้วางใจ ${s.brandName || 'Uhaus'} ค่ะ`);
   return lines.join('\n');
 }
-function openConfirmMsg(id) {
+function openConfirmMsg(id, group) {
   const b = byId(S.bookings, id); if (!b) return;
-  const text = confirmText(b);
+  const text = confirmText(b, group);
   openSheet('ส่งข้อความให้ลูกค้า', `<div class="msgbox" id="msg">${esc(text)}</div>
     <div class="btns"><button class="btn pri" id="cp">${ICON.copy}คัดลอกข้อความ</button><button class="btn red" id="sh">${ICON.send}แชร์ไป LINE / แอปอื่น</button></div>
     <div class="muted small">คัดลอกแล้วไปวางในแชต LINE หรือ Messenger ของลูกค้า</div>`, bd => {
@@ -1149,8 +1328,8 @@ function receiptHTML(rc) {
     <table><thead><tr><th style="width:28px">#</th><th>รายการ</th><th class="r">จำนวน</th><th class="r">ราคา/หน่วย</th><th class="r">จำนวนเงิน</th></tr></thead>
       <tbody>${items.map((it, i) => `<tr><td>${i + 1}</td><td>${esc(it.desc)}</td><td class="r">${it.qty}</td><td class="r">${money2(it.unit)}</td><td class="r">${money2(it.amount)}</td></tr>`).join('')}</tbody></table>
     <div class="sum"><div><span>รวมเป็นเงิน</span><span>${money2(sub)}</span></div>
-      ${Number(rc.discount) ? `<div><span>ส่วนลดโปรโมชั่น</span><span>−${money2(rc.discount)}</span></div>` : ''}
-      ${Number(rc.adjust) ? `<div><span>ปรับยอด</span><span>${money2(rc.adjust)}</span></div>` : ''}
+      ${Number(rc.discount) && rc.refType !== 'group' ? `<div><span>ส่วนลดโปรโมชั่น</span><span>−${money2(rc.discount)}</span></div>` : ''}
+      ${Number(rc.adjust) && rc.refType !== 'group' ? `<div><span>ปรับยอด</span><span>${money2(rc.adjust)}</span></div>` : ''}
       <div class="g"><span>จำนวนเงินทั้งสิ้น</span><span>${money2(rc.total)}</span></div></div>
     <div class="words">(${bahtText(rc.total)})</div>
     <div class="pay"><div>ชำระโดย: ☑ ${rc.method === 'qr' ? 'สแกน QR' : 'โอนเงิน'}<br>${esc(s.bankName)} ${esc(s.bankAccount)}</div><div style="text-align:right">${esc(s.brandName || '')}</div></div>
@@ -1311,14 +1490,14 @@ function recognizedThrough(b, D) {
   const n = Math.max(0, Math.min(nightsBetween(b.checkIn, stop), Number(b.nights)));
   return Number(b.total) * n / Number(b.nights);
 }
-function paidThrough(b, D) { return receiptsOf(b).filter(r => r.status === 'issued' && r.date <= D).reduce((n, r) => n + Number(r.total), 0); }
+function paidThrough(b, D) { return receiptsOf(b).filter(r => r.status === 'issued' && r.date <= D).reduce((n, r) => n + allocAmt(r, b), 0); }
 function forfeitThrough(b, D, from) { return forfeitsOf(b).filter(f => f.date <= D && (!from || f.date >= from)).reduce((n, f) => n + Number(f.amount), 0); }
 function vReports(main) {
   const [from, to] = rptRange(), before = addDays(from, -1);
   const rcs = S.receipts.filter(r => r.status === 'issued' && r.date >= from && r.date <= to).sort((a, b) => a.date.localeCompare(b.date) || a.no.localeCompare(b.no));
   const cash = rcs.reduce((n, r) => n + Number(r.total), 0);
   const byM = m => rcs.filter(r => r.method === m).reduce((n, r) => n + Number(r.total), 0);
-  const cashRoom = rcs.filter(r => r.refType === 'booking').reduce((n, r) => n + Number(r.total), 0);
+  const cashRoom = rcs.filter(r => r.refType !== 'grooming').reduce((n, r) => n + Number(r.total), 0);
   const groom = rcs.filter(r => r.refType === 'grooming').reduce((n, r) => n + Number(r.total), 0);
   let roomRev = 0, forfRev = 0, unearned = 0, accrued = 0;
   S.bookings.forEach(b => {
@@ -1370,7 +1549,7 @@ function vReports(main) {
   if ($('#rf')) { $('#rf').onchange = e => { S.rptFrom = e.target.value; render(); }; $('#rt').onchange = e => { S.rptTo = e.target.value; render(); }; }
   $('#csv').onclick = async () => {
     const head = ['วันที่', 'เลขที่ใบเสร็จ', 'ลูกค้า', 'ประเภท', 'ค่าห้อง', 'ค่าตัวเพิ่ม', 'ส่วนลด', 'ปรับยอด', 'อาบน้ำตัดขน', 'ยอดสุทธิ', 'ช่องทาง', 'ผู้รับเงิน'];
-    const rows = rcs.map(r => [r.date, r.no, r.customerName, r.refType === 'booking' ? 'ห้องพัก' : 'อาบน้ำตัดขน', r.roomAmount, r.extraAmount, r.discount, r.adjust, r.groomAmount, r.total, r.method === 'qr' ? 'QR' : 'โอน', r.receivedBy]);
+    const rows = rcs.map(r => [r.date, r.no, r.customerName, r.refType !== 'grooming' ? 'ห้องพัก' : 'อาบน้ำตัดขน', r.roomAmount, r.extraAmount, r.discount, r.adjust, r.groomAmount, r.total, r.method === 'qr' ? 'QR' : 'โอน', r.receivedBy]);
     const csv = '﻿' + [head, ...rows].map(r => r.map(v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"').join(',')).join('\r\n');
     const file = new File([csv], `Uhaus-ใบเสร็จ-${from}-${to}.csv`, { type: 'text/csv' });
     try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } } catch (e) { if (e.name === 'AbortError') return; }
@@ -1382,7 +1561,7 @@ function vReceipts(main) {
   let list = S.receipts.slice().sort((a, b) => b.no.localeCompare(a.no));
   if (q) list = list.filter(r => (r.no + ' ' + r.customerName + ' ' + r.customerPhone).toLowerCase().includes(q));
   main.innerHTML = `<input class="search" id="q" type="search" placeholder="ค้นหาเลขที่ใบเสร็จ หรือชื่อลูกค้า" value="${esc(S.rcQ || '')}">
-    <div class="list">${list.length ? list.slice(0, 300).map(r => `<div class="row" data-rc="${r.id}"><div class="main"><div class="t">${esc(r.no)} · ${esc(r.customerName)}</div><div class="s">${thDate(r.date)} · ${r.refType === 'booking' ? 'ห้องพัก' : 'อาบน้ำตัดขน'} · ${r.method === 'qr' ? 'QR' : 'โอน'}</div></div>
+    <div class="list">${list.length ? list.slice(0, 300).map(r => `<div class="row" data-rc="${r.id}"><div class="main"><div class="t">${esc(r.no)} · ${esc(r.customerName)}</div><div class="s">${thDate(r.date)} · ${r.refType !== 'grooming' ? 'ห้องพัก' : 'อาบน้ำตัดขน'} · ${r.method === 'qr' ? 'QR' : 'โอน'}</div></div>
       <div class="end">${r.status === 'void' ? '<span class="pill p-cxl">ยกเลิก</span>' : ''}<div class="num">${money2(r.total)}</div></div></div>`).join('') : '<div class="empty">ยังไม่มีใบเสร็จ</div>'}</div>`;
   $('#q').oninput = e => { S.rcQ = e.target.value; const pos = e.target.selectionStart; render(); const i = $('#q'); i.focus(); i.setSelectionRange(pos, pos); };
   bindRows(main);
