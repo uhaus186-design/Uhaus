@@ -67,6 +67,21 @@ nav.tabs button.on::after{content:"";position:absolute;top:4px;width:5px;height:
 .row:active{background:var(--paper2)}
 .row .av{width:40px;height:40px;border-radius:14px;background:var(--paper2);display:grid;place-items:center;flex:none;color:var(--navy)}
 .row .av svg{width:24px;height:24px}
+.av{position:relative}
+.av img,.pp img{width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block}
+.av .more{position:absolute;right:-4px;bottom:-4px;background:var(--navy);color:var(--ivory);font-size:10.5px;font-weight:600;border-radius:999px;padding:0 5px;line-height:16px;border:2px solid var(--paper)}
+.pp{width:58px;height:58px;border-radius:18px;background:var(--paper2);display:grid;place-items:center;flex:none;color:var(--navy);overflow:hidden;cursor:pointer}
+.pp.lg{width:76px;height:76px;border-radius:22px}
+.pp.sm{width:34px;height:34px;border-radius:11px}
+.pp svg{width:60%;height:60%}
+.petcard{display:flex;gap:12px;align-items:flex-start}
+.petcard .main{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.photo-pick{display:flex;align-items:center;gap:14px}
+.photo-pick .pp{width:96px;height:96px;border-radius:28px;border:2px dashed var(--sand);background:var(--paper)}
+.photo-pick .pp.has{border-style:solid;border-color:var(--line)}
+.viewer{position:fixed;inset:0;z-index:95;background:rgba(10,20,30,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:calc(env(safe-area-inset-top,0px) + 16px) 16px calc(env(safe-area-inset-bottom,0px) + 16px)}
+.viewer img{max-width:100%;max-height:80vh;border-radius:16px;object-fit:contain}
+.viewer b{color:#F7F3EB;font-family:var(--display);font-weight:500;font-size:18px}
 .row .main{flex:1;min-width:0}
 .row .t{font-weight:600;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row .s{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -417,10 +432,27 @@ function bookingVaxAlert(b) {
   const bad = issues.some(i => i.level === 'bad');
   return `<div class="alert ${bad ? 'bad' : 'warn'}"><b>${bad ? 'วัคซีนหมดอายุ' : 'ข้อมูลวัคซีนไม่ครบ'}</b> (ยังรับเข้าพักได้)<br>${issues.map(i => esc(i.name + ' · ' + i.text)).join('<br>')}</div>`;
 }
-function petAvatar(b) {
-  const sp = [...new Set(petIdsOf(b).map(id => (pet(id) || {}).species))];
-  return `<div class="av">${sp.length === 1 && sp[0] === 'cat' ? ICON.cat : ICON.dog}</div>`;
+function petPic(p, cls) {
+  p = p || {};
+  return `<div class="pp ${cls || ''}" ${p.photoId ? `data-view="${p.id}"` : ''}>${p.photoThumb ? `<img src="${p.photoThumb}" alt="${esc(p.name || '')}">` : (p.species === 'cat' ? ICON.cat : ICON.dog)}</div>`;
 }
+function petAvatar(b) {
+  const ps = petIdsOf(b).map(pet).filter(Boolean);
+  const withPic = ps.find(p => p.photoThumb);
+  const sp = [...new Set(ps.map(p => p.species))];
+  const inner = withPic ? `<img src="${withPic.photoThumb}" alt="">` : (sp.length === 1 && sp[0] === 'cat' ? ICON.cat : ICON.dog);
+  return `<div class="av">${inner}${ps.length > 1 ? `<span class="more">${ps.length}</span>` : ''}</div>`;
+}
+async function viewPetPhoto(id) {
+  const p = pet(id); if (!p || !p.photoId) return;
+  const v = document.createElement('div');
+  v.className = 'viewer';
+  v.innerHTML = `<img src="${p.photoThumb || ''}" alt="${esc(p.name)}"><b>${esc(p.name)}</b><button class="btn ghost" style="background:transparent;color:#F7F3EB;border-color:rgba(255,255,255,.35)">ปิด</button>`;
+  v.onclick = () => v.remove();
+  document.body.appendChild(v);
+  try { const url = await api('getPhoto', { fileId: p.photoId }, { silent: true }); const i = $('img', v); if (i) i.src = url; } catch (e) {}
+}
+document.addEventListener('click', e => { const t = e.target.closest('[data-view]'); if (t) { e.stopPropagation(); e.preventDefault(); viewPetPhoto(t.dataset.view); } }, true);
 function emptyBox(text) { return `<div class="empty">${ICON.paw}<span>${text}</span></div>`; }
 
 /* ====================== Render shell ====================== */
@@ -521,7 +553,7 @@ function bookingRow(b) {
 function groomRow(g) {
   const c = cust(g.customerId) || {}, p = pet(g.petId) || {};
   const st = { booked: ['นัดแล้ว', 'p-resv'], paid: ['ชำระแล้ว', 'p-ok'], cancelled: ['ยกเลิก', 'p-cxl'] }[g.status] || [g.status, 'p-out'];
-  return `<div class="row" data-gr="${g.id}"><div class="av">${p.species === 'cat' ? ICON.cat : ICON.dog}</div><div class="main"><div class="t">${esc(p.name || '-')} · ${esc(g.service)}</div>
+  return `<div class="row" data-gr="${g.id}"><div class="av">${p.photoThumb ? `<img src="${p.photoThumb}" alt="">` : p.species === 'cat' ? ICON.cat : ICON.dog}</div><div class="main"><div class="t">${esc(p.name || '-')} · ${esc(g.service)}</div>
     <div class="s">${esc(c.name || '')} · ${thDate(g.date)}</div></div><div class="end"><span class="pill ${st[1]}">${st[0]}</span><span class="small num muted">${money(g.price)} ฿</span></div></div>`;
 }
 function bindRows(root) {
@@ -651,9 +683,9 @@ function vCustomer(main) {
     </div>
     <div class="kpis"><div class="kpi"><div class="l">เข้าพัก (ครั้ง)</div><div class="v num">${st.visits}</div></div><div class="kpi"><div class="l">ยอดใช้จ่ายรวม</div><div class="v num">${money(st.spent)}<small> ฿</small></div></div></div>
     <div class="sec"><h2>สัตว์เลี้ยง (${ps.length})</h2><button class="lnk" id="np">+ เพิ่มสัตว์เลี้ยง</button></div>
-    ${ps.length ? ps.map(p => `<div class="card" data-pet="${p.id}" style="cursor:pointer;display:flex;flex-direction:column;gap:6px">
-        <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(p.name)}</b><span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '-')}${p.weight ? ' · ' + p.weight + ' กก.' : ''}</span></div>
-        ${vaxChips(p)}${p.behavior ? `<div class="small muted">นิสัย: ${esc(p.behavior)}</div>` : ''}</div>`).join('') : '<div class="card empty">ยังไม่มีสัตว์เลี้ยง</div>'}
+    ${ps.length ? ps.map(p => `<div class="card petcard" data-pet="${p.id}" style="cursor:pointer">${petPic(p)}<div class="main">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="color:var(--navy)">${esc(p.name)}</b><span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '-')}${p.weight ? ' · ' + p.weight + ' กก.' : ''}</span></div>
+        ${vaxChips(p)}${p.behavior ? `<div class="small muted">นิสัย: ${esc(p.behavior)}</div>` : ''}${p.photoThumb ? '' : '<div class="small" style="color:var(--terra)">ยังไม่มีรูปน้อง แตะเพื่อเพิ่มรูป</div>'}</div></div>`).join('') : '<div class="card empty">ยังไม่มีสัตว์เลี้ยง</div>'}
     <div class="sec"><h2>ประวัติการเข้าพัก</h2></div>
     <div class="list">${bks.length ? bks.map(bookingRow).join('') : '<div class="empty">ยังไม่มีประวัติ</div>'}</div>
     <div class="sec"><h2>ประวัติอาบน้ำตัดขน</h2></div>
@@ -738,11 +770,28 @@ function compressImage(file, max = 1600) {
     fr.onerror = () => rej(new Error('อ่านไฟล์ไม่ได้')); fr.readAsDataURL(file);
   });
 }
+function squareThumb(dataUrl, size) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(img.width, img.height), cv = document.createElement('canvas');
+      cv.width = cv.height = size;
+      cv.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, size, size);
+      res(cv.toDataURL('image/jpeg', 0.78));
+    };
+    img.onerror = () => rej(new Error('อ่านรูปไม่ได้'));
+    img.src = dataUrl;
+  });
+}
 function openPetForm(p, done) {
   p = p || {};
   const sp = p.species || 'dog';
   openSheet(p.id ? 'แก้ไขสัตว์เลี้ยง' : 'เพิ่มสัตว์เลี้ยง', `<form class="form" id="pf">
     <div class="small muted">เจ้าของ: <b>${esc((cust(p.customerId) || {}).name || '')}</b></div>
+    <div class="photo-pick"><label class="pp ${p.photoThumb ? 'has' : ''}" for="p-pic" id="p-picbox">${p.photoThumb ? `<img src="${p.photoThumb}" alt="">` : ICON.plus}</label>
+      <div class="form" style="gap:4px;flex:1"><b style="color:var(--navy)">รูปน้อง</b><span class="small muted">ถ่ายให้เห็นหน้าชัดๆ ช่วยให้พนักงานจำน้องได้</span>
+      <label for="p-pic" class="btn ghost" style="min-height:40px;padding:6px 12px;align-self:flex-start">${p.photoThumb ? 'เปลี่ยนรูป' : 'ถ่ายรูป / เลือกรูป'}</label></div>
+      <input id="p-pic" type="file" accept="image/*" hidden></div>
     ${field('p-name', 'ชื่อสัตว์เลี้ยง *', p.name, 'text', 'autocomplete="off"')}
     <div class="seg" id="p-sp"><button type="button" data-v="dog" class="${sp === 'dog' ? 'on' : ''}">หมา</button><button type="button" data-v="cat" class="${sp === 'cat' ? 'on' : ''}">แมว</button></div>
     <div class="grid2">${field('p-breed', 'สายพันธุ์', p.breed)}
@@ -761,7 +810,14 @@ function openPetForm(p, done) {
     <button class="btn pri full" type="submit">บันทึก</button>
     ${p.id && isAdmin() ? '<button class="btn danger full" type="button" id="p-del">ลบสัตว์เลี้ยง</button>' : ''}
   </form>`, (bd, el) => {
-    let species = sp, photo = '';
+    let species = sp, photo = '', pic = '', picThumb = '';
+    $('#p-pic', bd).onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        pic = await compressImage(f, 1200); picThumb = await squareThumb(pic, 160);
+        const box = $('#p-picbox', bd); box.classList.add('has'); box.innerHTML = `<img src="${picThumb}" alt="">`;
+      } catch (err) { toast(err.message); }
+    };
     const syncKen = () => $('#p-kenwrap', bd).hidden = species === 'cat';
     syncKen();
     $$('#p-sp button', bd).forEach(b => b.onclick = () => { species = b.dataset.v; $$('#p-sp button', bd).forEach(x => x.classList.toggle('on', x === b)); syncKen(); });
@@ -782,7 +838,8 @@ function openPetForm(p, done) {
           birth: fv(bd, 'p-birth'), weight: fv(bd, 'p-weight'), food: fv(bd, 'p-food'), meds: fv(bd, 'p-meds'), behavior: fv(bd, 'p-beh'),
           rabiesExp: fv(bd, 'p-rab'), comboExp: fv(bd, 'p-com'), kennelExp: species === 'cat' ? '' : fv(bd, 'p-ken'), fleaExp: fv(bd, 'p-flea'), note: fv(bd, 'p-note') });
         upsert(S.pets, rec);
-        if (photo) { rec = await api('uploadPhoto', { petId: rec.id, dataUrl: photo }, { text: 'กำลังอัปโหลดรูป…' }); upsert(S.pets, rec); }
+        if (pic) { rec = await api('uploadPetPhoto', { petId: rec.id, dataUrl: pic, thumb: picThumb }, { text: 'กำลังอัปโหลดรูปน้อง…' }); upsert(S.pets, rec); }
+        if (photo) { rec = await api('uploadPhoto', { petId: rec.id, dataUrl: photo }, { text: 'กำลังอัปโหลดรูปสมุดวัคซีน…' }); upsert(S.pets, rec); }
         closeSheet(el); toast('บันทึกสัตว์เลี้ยงแล้ว'); done && done(rec);
       } catch (err) { toast(err.message); }
     };
@@ -846,7 +903,7 @@ function openBookingEdit(d) {
       const box = $('#b-pets', bd);
       if (!d.customerId) { box.innerHTML = ''; return; }
       const ps = S.pets.filter(p => p.customerId === d.customerId);
-      box.innerHTML = `<div class="f"><label>น้องที่เข้าพัก</label><div class="form" style="gap:6px">${ps.map(p => `<label class="chk"><input type="checkbox" value="${p.id}" ${d.petIds.includes(p.id) ? 'checked' : ''}><span><b style="color:var(--navy)">${esc(p.name)}</b> <span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '')}</span></span></label>`).join('')}
+      box.innerHTML = `<div class="f"><label>น้องที่เข้าพัก</label><div class="form" style="gap:6px">${ps.map(p => `<label class="chk"><input type="checkbox" value="${p.id}" ${d.petIds.includes(p.id) ? 'checked' : ''}>${petPic(p, 'sm')}<span><b style="color:var(--navy)">${esc(p.name)}</b> <span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '')}</span></span></label>`).join('')}
         <button type="button" class="btn ghost" id="b-np">+ เพิ่มน้องใหม่</button></div></div>`;
       $$('input[type=checkbox]', box).forEach(c => c.onchange = () => { d.petIds = $$('input[type=checkbox]:checked', box).map(x => x.value); drawRooms(); });
       $('#b-np', box).onclick = () => openPetForm({ customerId: d.customerId }, p => { if (p) d.petIds.push(p.id); drawPets(); drawRooms(); });
@@ -967,7 +1024,7 @@ function openGroupForm(d) {
         const species = [...new Set(l.petIds.map(id => (pet(id) || {}).species))];
         const n = l.petIds.length || 1;
         const takenBy = id => lines.findIndex((o, j) => j !== i && o.petIds.includes(id));
-        const petsHtml = ps.length ? ps.map(p => { const k = takenBy(p.id); return `<label class="chk" style="${k >= 0 ? 'opacity:.5' : ''}"><input type="checkbox" data-pet="${i}" value="${p.id}" ${l.petIds.includes(p.id) ? 'checked' : ''} ${k >= 0 ? 'disabled' : ''}><span><b style="color:var(--navy)">${esc(p.name)}</b> <span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'}${k >= 0 ? ' · อยู่ห้องที่ ' + (k + 1) : ''}</span></span></label>`; }).join('') : '<div class="muted small">ลูกค้ายังไม่มีน้องในระบบ กด "+ เพิ่มน้องใหม่"</div>';
+        const petsHtml = ps.length ? ps.map(p => { const k = takenBy(p.id); return `<label class="chk" style="${k >= 0 ? 'opacity:.5' : ''}"><input type="checkbox" data-pet="${i}" value="${p.id}" ${l.petIds.includes(p.id) ? 'checked' : ''} ${k >= 0 ? 'disabled' : ''}>${petPic(p, 'sm')}<span><b style="color:var(--navy)">${esc(p.name)}</b> <span class="muted small">${p.species === 'cat' ? 'แมว' : 'หมา'}${k >= 0 ? ' · อยู่ห้องที่ ' + (k + 1) : ''}</span></span></label>`; }).join('') : '<div class="muted small">ลูกค้ายังไม่มีน้องในระบบ กด "+ เพิ่มน้องใหม่"</div>';
         let opts = '<option value="">– เลือกห้อง –</option>';
         ZONES.forEach(z => {
           const rs = activeRooms().filter(r => r.zone === z && (species.length !== 1 || r.species === species[0]));
@@ -1100,9 +1157,9 @@ function openBooking(id) {
       ${b.cancelReason ? `<dt>เหตุผล</dt><dd>${esc(b.cancelReason)}</dd>` : ''}
     </dl></div>
     ${['pending', 'reserved', 'in'].includes(st) ? bookingVaxAlert(b) : ''}
-    ${pets.map(p => `<div class="card" style="display:flex;flex-direction:column;gap:6px"><b style="color:var(--navy)">${esc(p.name)} <span class="muted small" style="font-weight:400">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '')}</span></b>
+    ${pets.map(p => `<div class="card petcard">${petPic(p, 'lg')}<div class="main"><b style="color:var(--navy);font-size:16px">${esc(p.name)} <span class="muted small" style="font-weight:400">${p.species === 'cat' ? 'แมว' : 'หมา'} · ${esc(p.breed || '')}</span></b>
       ${p.food ? `<div class="small">อาหาร: ${esc(p.food)}</div>` : ''}${p.meds ? `<div class="small">ยา: ${esc(p.meds)}</div>` : ''}${p.behavior ? `<div class="small">นิสัย: ${esc(p.behavior)}</div>` : ''}
-      ${vaxChips(p, b.checkOut)}</div>`).join('')}
+      ${vaxChips(p, b.checkOut)}</div></div>`).join('')}
     <div class="price num">
       <div class="ln"><span>ค่าห้อง ${money(b.roomRate)} × ${b.nights} คืน</span><span>${money(b.roomAmount)}</span></div>
       ${Number(b.extraAmount) ? `<div class="ln"><span>ตัวเพิ่ม ${b.extraPets} ตัว × ${money(b.extraFee)} × ${b.nights} คืน</span><span>${money(b.extraAmount)}</span></div>` : ''}
